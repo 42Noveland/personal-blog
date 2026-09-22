@@ -1,0 +1,16 @@
+[Unit]
+Description=Nightboat personal blog (zero-dep Node engine)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/blog
+ExecStart=/usr/local/bin/node server.js
+Restart=always
+RestartSec=3
+StandardOutput=append:/var/log/blog.log
+StandardError=append:/var/log/blog.log
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target

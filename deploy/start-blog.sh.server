@@ -1,0 +1,14 @@
+#!/bin/bash
+# start-blog.sh — 服务已由 systemd 托管（/etc/systemd/system/blog.service）
+# 保留此脚本以便沿用原有习惯：它只转发给 systemctl，避免手工起进程与 systemd 抢 3081 端口。
+set -e
+case "${1:-restart}" in
+  start)   systemctl start blog ;;
+  stop)    systemctl stop blog ;;
+  restart|"") systemctl restart blog ;;
+  status)  systemctl status blog --no-pager ;;
+  log)     tail -n "${2:-50}" /var/log/blog.log ;;
+  *) echo "用法: bash start-blog.sh [start|stop|restart|status|log]"; exit 1 ;;
+esac
+sleep 2
+systemctl is-active blog >/dev/null && echo "blog: active（PID $(systemctl show blog -p MainPID --value)）" || { echo "blog: 未运行"; exit 1; }

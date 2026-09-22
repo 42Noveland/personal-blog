@@ -31,12 +31,25 @@ node tools/set-password.js '强密码'
 
 # 方式 A：systemd（推荐，开机自启 + 崩溃重启）
 sudo cp deploy/blog.service /etc/systemd/system/blog.service
+# ⚠ 应用目录不是 /opt/blog 时，改 unit 里的 WorkingDirectory 与 ExecStart 路径
+#   （例如部署在 /root/blog 就把 WorkingDirectory 改成 /root/blog）
 sudo systemctl daemon-reload && sudo systemctl enable --now blog
 journalctl -u blog -f
 
 # 方式 B：脚本启动（与 nohup 等价，不安装系统服务）
 bash deploy/start-blog.sh          # 内含端口占用清理 + 健康检查
 tail -f /var/log/blog.log
+```
+
+**两种方式不要混用**：先手工起了进程、再 `systemctl start blog`，会因 3081 端口被占而启动失败。
+用 systemd 之后再想「重启一下」，直接 `systemctl restart blog`；`deploy/start-blog.sh` 是给方式 B 用的。
+
+验证重启与自愈：
+
+```bash
+systemctl restart blog                    # 正常重启
+kill -9 $(systemctl show blog -p MainPID --value)   # 模拟崩溃，Restart=always 会在 3 秒内拉起
+systemctl show blog -p MainPID --value    # PID 应该变了
 ```
 
 ## 3. 反向代理
