@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    name: 端到端烟测（117 项断言）
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: ['22.14', '24']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: 语法检查
+        run: |
+          for f in server.js lib/*.js plugins/*/index.js plugins/*/public/*.js public/assets/*.js tools/*.js tests/*.js; do
+            node --check "$f" || exit 1
+          done
+          echo "全部 JS 文件语法通过"
+
+      - name: 端到端自检
+        run: node tests/smoke.js
+
+      - name: 失败时输出服务端日志
+        if: failure()
+        run: |
+          ls -la
+          find . -name "*.log" -maxdepth 2 -exec tail -50 {} \; || true
