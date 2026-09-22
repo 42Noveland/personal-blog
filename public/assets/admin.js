@@ -553,7 +553,8 @@
         '</div>' +
         '<div class="card"><h2>导航与页脚</h2>' +
           '<label class="field"><span>导航 <em>（每行：显示文字 | 链接）</em></span><textarea data-set="nav-lines" rows="5">' + esc(navLines) + '</textarea></label>' +
-          '<label class="field"><span>页脚补充文字</span><input type="text" data-set="site.footer" value="' + esc(s.footer) + '"></label>' +
+          '<label class="field"><span>页脚补充文字 <em>（纯文本）</em></span><input type="text" data-set="site.footer" value="' + esc(s.footer) + '"></label>' +
+          '<label class="field"><span>页脚来源标注 <em>（支持 HTML，留空则不显示该行）</em></span><input type="text" data-set="site.poweredBy" value="' + esc(s.poweredBy || '') + '"></label>' +
           '<label class="field"><span>备案/其它信息</span><input type="text" data-set="site.icp" value="' + esc(s.icp) + '"></label>' +
         '</div>' +
         '<div class="card"><h2>修改管理密码</h2>' +

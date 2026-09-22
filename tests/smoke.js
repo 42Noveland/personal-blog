@@ -332,6 +332,14 @@ async function waitPort(timeoutMs = 15000) {
     r = await req('POST', '/api/admin/plugins', { body: { name: 'comments', action: 'setting', key: 'moderation', value: true } });
     ok('合法设置项可写', r.status === 200);
 
+    r = await req('POST', '/api/admin/settings', { body: { settings: { 'site.poweredBy': '自定义署名 · 我的引擎' } } });
+    ok('页脚来源标注可改', r.status === 200);
+    r = await req('GET', '/');
+    ok('自定义署名生效', r.text.includes('自定义署名 · 我的引擎') && !r.text.includes('Powered by'));
+    r = await req('POST', '/api/admin/settings', { body: { settings: { 'site.poweredBy': '' } } });
+    r = await req('GET', '/');
+    ok('清空后页脚整行不渲染', !r.text.includes('footer-powered'));
+
     r = await req('POST', '/api/admin/password', { body: { current: PASSWORD, next: 'Temp-Password-1' } });
     ok('改密成功并要求重登', r.status === 200 && r.data.relogin === true, JSON.stringify(r.data));
     r = await req('GET', '/api/admin/stats');
