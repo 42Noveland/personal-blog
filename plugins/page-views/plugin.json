@@ -1,0 +1,11 @@
+{
+  "name": "page-views",
+  "title": "浏览量统计",
+  "version": "1.0.0",
+  "author": "Hermes",
+  "description": "统计每篇文章的阅读次数：文章页计数、卡片显示数字、侧栏「热门文章」排行榜。",
+  "hooks": ["postMeta", "sidebar", "contentFilter"],
+  "settings": [
+    { "key": "sidebarCount", "label": "侧栏热门文章条数", "type": "number", "default": 5 }
+  ]
+}

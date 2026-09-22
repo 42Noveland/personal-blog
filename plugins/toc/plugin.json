@@ -1,0 +1,16 @@
+{
+  "name": "toc",
+  "title": "文章目录",
+  "version": "1.0.0",
+  "author": "Hermes",
+  "description": "自动为长文生成可折叠目录，带滚动高亮（阅读位置指示）。",
+  "hooks": ["head", "contentFilter", "postHeader"],
+  "settings": [
+    { "key": "minHeadings", "label": "最少标题数才显示", "type": "number", "default": 3 },
+    { "key": "maxLevel", "label": "收录到几级标题", "type": "select", "default": "3", "options": [
+      { "value": "2", "label": "只收 H2" },
+      { "value": "3", "label": "H2 ~ H3" },
+      { "value": "4", "label": "H2 ~ H4" }
+    ] }
+  ]
+}

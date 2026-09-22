@@ -1,0 +1,14 @@
+{
+  "name": "example",
+  "title": "扩展示例（照着改即可）",
+  "version": "1.0.0",
+  "author": "Hermes",
+  "description": "一份可直接复制的最小插件：演示钩子、自有路由、自有数据表、插件设置与页脚/导航注入。停用状态下不影响站点。",
+  "enabledByDefault": false,
+  "priority": 100,
+  "hooks": ["setup", "navItems", "footer", "routes", "widgetTypes"],
+  "settings": [
+    { "key": "greeting", "label": "页脚问候语", "type": "text", "default": "由 example 插件注入" },
+    { "key": "showNav", "label": "在导航栏加入「示例」入口", "type": "bool", "default": true }
+  ]
+}

@@ -1,0 +1,43 @@
+{
+  "site": {
+    "title": "我的博客",
+    "subtitle": "一句话副标题",
+    "description": "站点描述（首页 Hero 与 SEO 使用）",
+    "aboutShort": "侧栏简介，留空则不显示",
+    "author": "你的名字",
+    "avatar": "",
+    "footer": "",
+    "icp": "",
+    "lang": "zh-CN",
+    "nav": [
+      { "label": "首页", "href": "/" },
+      { "label": "归档", "href": "/archive" },
+      { "label": "关于", "href": "/p/about" }
+    ],
+    "social": [
+      { "label": "GitHub", "href": "https://github.com/yourname" }
+    ]
+  },
+
+  "server": {
+    "host": "127.0.0.1",
+    "port": 3081,
+    "basePath": "",
+    "secureCookies": false
+  },
+
+  "posts": { "perPage": 8, "dateFormat": "YYYY-MM-DD", "maxSummary": 150 },
+  "markdown": { "allowRawHtml": true, "breaks": false, "highlight": true },
+
+  "theme": "midnight",
+
+  "admin": {
+    "user": "admin",
+    "passwordHash": "",
+    "sessionDays": 7,
+    "loginMaxFails": 5,
+    "loginLockMinutes": 10
+  },
+
+  "dev": { "watchContent": true, "watchPlugins": true }
+}

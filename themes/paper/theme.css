@@ -1,0 +1,60 @@
+/* ==========================================================================
+   主题：宣纸 (paper) — 暖色浅色默认 / 夜间模式可选
+   ========================================================================== */
+
+:root {
+  --bg: #fdfaf4;
+  --bg-soft: #f7f2e8;
+  --card: #fffdf8;
+  --text: #2b2620;
+  --text-dim: #574e44;
+  --text-mute: #918676;
+  --accent: #b4553a;
+  --accent-2: #a8792c;
+  --accent-soft: rgba(180, 85, 58, .10);
+  --accent-2-soft: rgba(168, 121, 44, .09);
+  --border: #e8dfd0;
+  --code-bg: #f6f1e6;
+  --radius: 12px;
+  --max-width: 1120px;
+  --shadow: 0 14px 34px -30px rgba(70, 50, 20, .55);
+  --font-sans: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", -apple-system, sans-serif;
+  --font-serif: "Songti SC", "Noto Serif SC", "Source Han Serif SC", "Iowan Old Style", Georgia, serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --hl-key: #a12a3c;
+  --hl-str: #2f6b3c;
+  --hl-num: #1d6b7f;
+  --hl-com: #9a8f7d;
+  --hl-fn:  #7a3a91;
+  --hl-op:  #9a5a12;
+  color-scheme: light;
+}
+
+:root[data-mode="dark"] {
+  --bg: #16130f;
+  --bg-soft: #1c1813;
+  --card: #211c16;
+  --text: #efe7db;
+  --text-dim: #c0b5a4;
+  --text-mute: #8b8071;
+  --accent: #e28b63;
+  --accent-2: #d8b45f;
+  --accent-soft: rgba(226, 139, 99, .13);
+  --accent-2-soft: rgba(216, 180, 95, .10);
+  --border: #332b22;
+  --code-bg: #1a1611;
+  --shadow: 0 18px 40px -30px rgba(0, 0, 0, .85);
+  --hl-key: #ef8f7c;
+  --hl-str: #a8c98a;
+  --hl-num: #86c5d8;
+  --hl-com: #857a68;
+  --hl-fn:  #d3a4e0;
+  --hl-op:  #e0b070;
+  color-scheme: dark;
+}
+
+/* 主题专属：正文用衬线体，标题居中偏左的传统书籍感 */
+.prose { font-family: var(--font-serif); font-size: 17px; line-height: 1.9; }
+.prose h2 { border-bottom: 0; text-align: left; }
+.post-card-title, .hero-title { letter-spacing: 0; }
+.brand-mark { border-radius: 8px; background: linear-gradient(140deg, var(--accent), var(--accent-2)); }

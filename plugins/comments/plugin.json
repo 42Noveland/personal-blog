@@ -1,0 +1,14 @@
+{
+  "name": "comments",
+  "title": "评论系统",
+  "version": "1.0.0",
+  "author": "Hermes",
+  "description": "文章评论：前台表单 + 列表、IP 限流、蜜罐反垃圾、可选「先审后发」，后台自带审核面板（演示插件自带 API、后台面板与静态资源）。",
+  "hooks": ["setup", "head", "postFooter", "adminPanels", "routes"],
+  "settings": [
+    { "key": "enabled", "label": "启用评论", "type": "bool", "default": true },
+    { "key": "moderation", "label": "先审后发（新评论需在后台通过后展示）", "type": "bool", "default": false },
+    { "key": "maxLength", "label": "评论最大字数", "type": "number", "default": 1000 },
+    { "key": "perPage", "label": "每页显示条数", "type": "number", "default": 20 }
+  ]
+}

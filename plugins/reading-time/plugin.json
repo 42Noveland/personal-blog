@@ -1,0 +1,11 @@
+{
+  "name": "reading-time",
+  "title": "阅读时长",
+  "version": "1.0.0",
+  "author": "Hermes",
+  "description": "在文章标题下方显示预计阅读时长（中文按 400 字/分，英文按 220 词/分估算）。",
+  "hooks": ["head", "postMeta"],
+  "settings": [
+    { "key": "showWords", "label": "同时显示字数", "type": "bool", "default": false }
+  ]
+}

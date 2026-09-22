@@ -1,0 +1,22 @@
+# /etc/systemd/system/blog.service —— 可选：开机自启 + 崩溃自动重启
+# 安装：sudo cp blog.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now blog
+# 卸载：sudo systemctl disable --now blog && sudo rm /etc/systemd/system/blog.service
+# 不用 systemd 时，用 deploy/start-blog.sh 手动启动即可。
+
+[Unit]
+Description=Nightboat personal blog (zero-dep Node engine)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/blog
+ExecStart=/usr/bin/env node server.js
+Restart=always
+RestartSec=3
+StandardOutput=append:/var/log/blog.log
+StandardError=append:/var/log/blog.log
+# 仅绑定 127.0.0.1，外部访问统一走 nginx
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target
