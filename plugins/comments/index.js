@@ -6,7 +6,15 @@
  * 后台：adminPanels 注册「评论管理」页签，public/admin.js 负责审核 UI
  * 安全：IP 限流 + 蜜罐字段 + 长度限制 + 控制字符清洗；渲染端一律转义
  */
+const fs = require('fs');
+const path = require('path');
 const { escapeHtml, clientIp, RateLimiter } = require('../../lib/utils');
+const PUBLIC_DIR = path.join(__dirname, 'public');
+
+/** 前台资源版本号 = 文件 mtime（写死常量会让浏览器一直用缓存里的旧脚本/样式） */
+function assetVer(file) {
+  try { return String(Math.floor(fs.statSync(path.join(PUBLIC_DIR, file)).mtimeMs)); } catch (_) { return '1'; }
+}
 
 const postLimiter = new RateLimiter(5, 10 * 60000); // 每 IP 十分钟最多 5 条
 
@@ -30,9 +38,10 @@ module.exports = {
   },
 
   head(ctx) {
-    const v = '1';
-    return `<link rel="stylesheet" href="${ctx.url('/plugin-assets/comments/comments.css?v=' + v)}">
-    <script src="${ctx.url('/plugin-assets/comments/comments.js?v=' + v)}" defer></script>`;
+    const cv = assetVer('comments.css');
+    const jv = assetVer('comments.js');
+    return `<link rel="stylesheet" href="${ctx.url('/plugin-assets/comments/comments.css?v=' + cv)}">
+    <script src="${ctx.url('/plugin-assets/comments/comments.js?v=' + jv)}" defer></script>`;
   },
 
   postFooter(ctx) {
@@ -77,7 +86,7 @@ module.exports = {
         </div>
       </div>
       <div class="card" style="padding:6px 10px"><table class="tbl"><tbody data-cmt-rows></tbody></table></div>`,
-      script: '/plugin-assets/comments/admin.js',
+      script: '/plugin-assets/comments/admin.js?v=' + assetVer('admin.js'),
     }];
   },
 

@@ -38,3 +38,18 @@
 .cf-msg.err { color: #ff6b81; }
 .comments-more { align-self: center; padding: 8px 16px; border-radius: 10px; border: 1px solid var(--border); background: transparent; color: var(--text-dim); cursor: pointer; font-size: 13.5px; }
 .comments-more:hover { border-color: var(--accent); color: var(--accent); }
+
+/* 手机端：输入框字号 ≥16px（iOS 聚焦不再自动放大），提交按钮占满宽度 */
+@media (max-width: 720px) {
+  .comments { margin-top: 40px; padding-top: 24px; }
+  .comments-title { font-size: 17.5px; }
+  .comment-item { padding: 14px; border-radius: 12px; }
+  .comment-form { padding: 16px; border-radius: 14px; }
+  .comment-form input[type=text], .comment-form input[type=email], .comment-form textarea { font-size: 16px; }
+  .comment-form textarea { min-height: 96px; }
+  .cf-row { gap: 10px; margin-bottom: 10px; }
+  .cf-row input { min-width: 100%; }
+  .cf-actions { flex-wrap: wrap; gap: 10px; }
+  .cf-actions .btn { flex: 1; padding: 12px 18px; }
+  .comments-more { padding: 10px 18px; }
+}

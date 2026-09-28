@@ -13,6 +13,7 @@ module.exports = {
              border-radius: 14px; background: color-mix(in srgb, var(--card) 70%, transparent); }
       .toc-title { display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;
                    font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-mute); }
+      .toc-count { margin-left: auto; letter-spacing: 0; text-transform: none; font-size: 12px; }
       .toc-list { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
       .toc-list a { display: block; padding: 5px 10px; border-radius: 8px; color: var(--text-dim);
                     font-size: 14px; border-left: 2px solid transparent; }
@@ -21,6 +22,17 @@ module.exports = {
       .toc-list a.lv4 { padding-left: 46px; font-size: 13px; }
       .toc-list a.active { color: var(--accent); border-left-color: var(--accent); background: var(--accent-soft); }
       .toc.collapsed .toc-list { display: none; }
+      .toc.collapsed .toc-title .toc-arrow { transform: rotate(-90deg); }
+      .toc-arrow { transition: transform .18s ease; }
+      /* 手机端：目录默认收起，标题整行可点，条目加高便于点按 */
+      @media (max-width: 720px) {
+        .toc { margin-bottom: 22px; padding: 12px 14px; border-radius: 12px; }
+        .toc-title { padding: 8px 0; font-size: 12.5px; }
+        .toc-list { margin-top: 8px; }
+        .toc-list a { padding: 9px 10px; font-size: 14.5px; }
+        .toc-list a.lv3 { padding-left: 26px; font-size: 14px; }
+        .toc-list a.lv4 { padding-left: 40px; font-size: 13.5px; }
+      }
     </style>`;
   },
 
@@ -37,13 +49,15 @@ module.exports = {
     const items = headings.map((h) =>
       `<li><a class="lv${h.level}" href="#${encodeURIComponent(h.id)}">${escapeHtml(h.text)}</a></li>`).join('');
     return `<nav class="toc" id="post-toc">
-      <div class="toc-title" data-toc-toggle>📑 目录 <span style="margin-left:auto">▾</span></div>
+      <div class="toc-title" data-toc-toggle>📑 目录 <span class="toc-count">${headings.length} 节</span><span class="toc-arrow">▾</span></div>
       <ul class="toc-list">${items}</ul>
     </nav>
     <script nonce="${ctx.nonce || ''}">
     (function(){
       var toc = document.getElementById('post-toc');
       if (!toc) return;
+      // 窄屏默认收起，避免目录把正文推到首屏之外
+      if (window.matchMedia && window.matchMedia('(max-width: 720px)').matches) toc.classList.add('collapsed');
       toc.querySelector('[data-toc-toggle]').addEventListener('click', function(){
         toc.classList.toggle('collapsed');
       });

@@ -4,7 +4,8 @@
   var root = document.querySelector('[data-comments]');
   if (!root) return;
 
-  var base = root.dataset.base || '';
+  // basePath 为空时服务端给出 '/'，直接拼接会得到 '//api/...'（协议相对 URL，指向主机 api）→ 去掉尾部斜杠
+  var base = (root.dataset.base || '').replace(/\/+$/, '');
   var slug = root.dataset.slug;
   var listEl = root.querySelector('[data-list]');
   var countEl = root.querySelector('[data-count]');
