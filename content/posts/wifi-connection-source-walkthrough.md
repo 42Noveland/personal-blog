@@ -2,20 +2,20 @@
 title: 连上 WiFi 的那几秒：hostapd / wpa_supplicant 源码漫游
 date: 2026-01-20 10:00
 tags: [WiFi, 源码分析, 网络, hostapd]
-summary: 把 wpa_supplicant 连上 AP 的那几秒拆开看：进程怎么启动、它靠哪三条通道跟外界说话、四次握手到底在谈什么。行号全部对着 hostap 仓库实测。
+summary: wpa_supplicant 连上 AP 通常只需要几秒。本文按启动流程、底层通信、连接建立三个阶段梳理这几秒里涉及的源码：eloop 事件循环、控制接口 / netlink / EAPOL 三条通道、四次握手与密钥安装，行号均对着 hostap 仓库实测。
 ---
 
-我在终端敲下回车，`wpa_supplicant -i wlan0 -c wpa.conf` 开始刷日志。三秒后连上了。
+## 简介
 
-这三秒里跑掉的代码，比很多人一辈子读完的 C 代码都多。而真正有意思的是：这么庞大的东西，主干其实只有三件事——**程序怎么醒过来、它靠什么跟外界说话、以及一次连接到底是怎么谈成的**。这篇文章就聊这三件事，代码行号全部对着 `hostap` 仓库 HEAD `d05533d`（2026-09 的上游 main）实测过，你可以照着翻。
+wpa_supplicant 是运行在用户空间的无线客户端守护程序，扫描、选网、认证与密钥协商都由它负责；hostapd 是与之对应的 AP 侧守护程序。从敲下 `wpa_supplicant -i wlan0 -c wpa.conf` 到连接建立，通常只有几秒钟，但在这几秒里，用户态程序与内核、无线固件以及对端 AP 之间要完成一整套消息往来：进程启动、事件循环运转、扫描、选网、认证、关联，最后以四次握手协商出会话密钥。这几秒里经过的代码路径相当可观，主干却只有三件事——**程序怎么醒过来、它靠什么跟外界说话、以及一次连接到底是怎么谈成的**。
 
----
+本文以 STA 侧连接 AP 为主线，按这三件事依次展开；涉及 AP 侧逻辑时，以 hostapd 对照说明。文中所有 `路径:行号` 引用都对着 `hostap` 仓库 HEAD `d05533d`（2026-09 的上游 main）实测核对过，复核方法见文末。
 
-## 一、醒过来：启动流程
+## 启动流程
 
-### hostapd：先把自己准备好，再把 beacon 打出去
+### hostapd：接口初始化与 beacon 下发
 
-hostapd 的 `main()` 朴素得有点不像话。它做三件事：解析命令行、把 `hostapd.conf` 里的每个 BSS 解析成内存里的 `hostapd_iface`/`hostapd_data`、然后一个一个接口去初始化。真正开始"干活"的入口叫 `hostapd_setup_interface()`，而这函数短得可以整段抄下来（`src/ap/hostapd.c:3001`）：
+hostapd 的 `main()` 很朴素，它只做三件事：解析命令行、把 `hostapd.conf` 中的每个 BSS 解析成内存里的 `hostapd_iface`/`hostapd_data`，然后逐个初始化接口。真正开始工作的入口是 `hostapd_setup_interface()`，该函数很短，可以整段引出（`src/ap/hostapd.c:3001`）：
 
 ```c
 int hostapd_setup_interface(struct hostapd_iface *iface)
@@ -35,21 +35,21 @@ int hostapd_setup_interface(struct hostapd_iface *iface)
 }
 ```
 
-它是个壳。里面那个 `setup_interface()` 才是重活：初始化驱动、跟驱动协商能力、把 STA 列表清空、设信道和加密方式，然后——这是关键——如果后面还有耗时的动作（ACS 选信道、DFS 雷达检测、HT 共存扫描），它会先返回 0，等那些动作在事件循环里做完，再由回调 `hostapd_setup_interface_complete()` 收尾。
+它本身只是一个封装，实际工作由 `setup_interface()` 完成：初始化驱动、与驱动协商能力、清空 STA 列表、设置信道与加密方式。需要注意的是，如果后面还有耗时的动作（ACS 选信道、DFS 雷达检测、HT 共存扫描），`setup_interface()` 会先返回 0，等这些动作在事件循环中做完，再由回调 `hostapd_setup_interface_complete()` 收尾。
 
-这个"先返回、后回调"的模式在 hostap 里到处都是，看代码时如果发现某个函数明明没做完就返回了，八成是它把尾巴挂到 eloop 上了。
+这种"先返回、后回调"的模式在 hostap 中反复出现。阅读代码时如果发现某个函数尚未做完便已返回，多半是它把后续工作挂到了 eloop 上。
 
-接口准备好之后，轮到 BSS 装配（`hostapd_setup_bss()`）：起 hostapd 自己的状态机、准备 WPA 认证器、把 BSS 挂到驱动上。最后一步是把 beacon 推下去，入口是 `ieee802_11_set_beacon()`（`src/ap/beacon.c:3397`）。beacon 的内容由 `ieee802_11_build_ap_params()`（`src/ap/beacon.c:2283`）组装，这函数有将近 500 行，基本就是在做填空题：SSID、支持的速率、DS 参数、国家码、各种能力元素、RSN、WMM、HE/EHT、RNR、MBSSID……一个 AP 的"人设"就是在这 500 行里拼出来的。
+接口就绪之后是 BSS 装配（`hostapd_setup_bss()`）：启动 hostapd 自己的状态机、准备 WPA 认证器、把 BSS 挂到驱动上。最后一步是下发 beacon，入口为 `ieee802_11_set_beacon()`（`src/ap/beacon.c:3397`）。beacon 的内容由 `ieee802_11_build_ap_params()`（`src/ap/beacon.c:2283`）组装；该函数将近 500 行，基本是在做填空题：SSID、支持的速率、DS 参数、国家码、各种能力元素、RSN、WMM、HE/EHT、RNR、MBSSID……一个 AP 的"人设"就是在这 500 行里拼出来的。
 
-有意思的细节：如果这个 AP 是 6 GHz 共置（同一台机器同时开 2.4/5/6 GHz）或者是 Wi-Fi 7 的 MLD，`ieee802_11_set_beacon()` 不只设自己，还会把兄弟接口的 beacon 一起重设一遍。多链路时代的 beacon 不是一个接口的事。
+还有一个容易忽略的细节：如果该 AP 是 6 GHz 共置（同一台机器同时开启 2.4/5/6 GHz），或者是 Wi-Fi 7 的 MLD，`ieee802_11_set_beacon()` 不只设置自己，还会把兄弟接口的 beacon 一并重设。多链路时代，beacon 不再是单个接口的事。
 
-### wpa_supplicant：先扫一遍再决定，但扫描是排期出来的
+### wpa_supplicant：启动链路与首次扫描的排期
 
-wpa_supplicant 的启动链路长一些，顺序也值得记一下：`main()` → `wpa_supplicant_init()`（全局：eloop、全局控制接口、驱动注册表）→ 对每个 `-i` 接口调 `wpa_supplicant_add_iface()` → `wpa_supplicant_init_iface()`。
+wpa_supplicant 的启动链路要长一些，顺序如下：`main()` → `wpa_supplicant_init()`（全局部分：eloop、全局控制接口、驱动注册表）→ 对每个 `-i` 指定的接口调用 `wpa_supplicant_add_iface()` → `wpa_supplicant_init_iface()`。
 
-`wpa_supplicant_init_iface()` 里有一串按顺序的初始化，顺手记下几个位置：驱动初始化 `wpa_supplicant_driver_init()` 在 `wpa_supplicant/wpa_supplicant.c:7294`，控制接口在 `:8970`，BSS 表在 `:9012`。
+`wpa_supplicant_init_iface()` 中有一串按顺序执行的初始化，其中几处位置值得记住：驱动初始化 `wpa_supplicant_driver_init()` 在 `wpa_supplicant/wpa_supplicant.c:7294`，控制接口在 `:8970`，BSS 表在 `:9012`。
 
-驱动初始化那段的尾部特别值得看（`wpa_supplicant/wpa_supplicant.c:7343`）：
+驱动初始化段的尾部值得单独一看（`wpa_supplicant/wpa_supplicant.c:7343`）：
 
 ```c
 #ifndef ANDROID
@@ -62,15 +62,15 @@ wpa_supplicant 的启动链路长一些，顺序也值得记一下：`main()` �
 #endif /* ANDROID */
 ```
 
-启动阶段**不会**立刻扫描。它先把扫描排到一个定时器上，延迟 `interface_count % 3` 秒再等 100 ms，`interface_count` 是全局递增的接口序号——也就是说，插了三张网卡的话，三个 wpa_supplicant 实例的首次扫描会被错开，不会在同一毫秒里抢射频。优先尝试的是 `sched_scan`（交给驱动/固件后台扫），失败才退回到普通扫描。
+从中可以看出：启动阶段**不会**立刻扫描。它先把扫描排到一个定时器上：延迟 `interface_count % 3` 秒，再加 100 ms；`interface_count` 是全局递增的接口序号。也就是说，插了三张网卡的话，三个 wpa_supplicant 实例的首次扫描会彼此错开，不会在同一毫秒里抢射频。扫描方式优先尝试 `sched_scan`（交由驱动/固件在后台完成），失败后才退回到普通扫描。
 
-`wpa_supplicant_req_scan()` 本身只有二十几行（`wpa_supplicant/scan.c:1624`），它连扫描都不发，只是调 `eloop_deplete_timeout()` 去调整那个定时器：如果已经排了更早的请求就忽略本次，如果没排过就新注册一个。
+`wpa_supplicant_req_scan()` 本身只有二十几行（`wpa_supplicant/scan.c:1624`）。细心的读者会发现：它连扫描都不发，而是调用 `eloop_deplete_timeout()` 调整那个定时器——如果已经存在更早的请求就忽略本次，尚未排过则新注册一个。
 
-### 两者最后都掉进同一个循环
+### eloop：共同的事件循环
 
-不管是 hostapd 还是 wpa_supplicant，`main()` 的最后一句都是进事件循环。hostap 全仓库没有一处 `pthread_create`，所有 I/O 都在单线程的 eloop 上跑，实现就在 `src/utils/eloop.c` 一个文件里（select/poll/epoll/kqueue 四套后端，编译期三选一）。
+无论 hostapd 还是 wpa_supplicant，`main()` 的最后一步都是进入事件循环。hostap 全仓库没有一处 `pthread_create`，所有 I/O 都在单线程的 eloop 上运行，实现集中在 `src/utils/eloop.c` 一个文件里（select/poll/epoll/kqueue 四套后端，编译期选择其一）。
 
-超时是怎么排的？看 `eloop_register_timeout()` 里那几行（`src/utils/eloop.c:805`）：
+超时是如何排队的？看 `eloop_register_timeout()` 中的这几行（`src/utils/eloop.c:805`）：
 
 ```c
 	/* Maintain timeouts in order of increasing time */
@@ -83,9 +83,9 @@ wpa_supplicant 的启动链路长一些，顺序也值得记一下：`main()` �
 	dl_list_add_tail(&eloop.timeout, &timeout->list);
 ```
 
-一条有序链表，插入时线性找位置。看着很土，但全进程只有这一条链，主循环每次只要取链表头就知道下一次该等多久。复杂度 O(n)，而 n 是"同时存在的定时器数量"，实际上百量级，够用了。
+所有超时挂在一条按到期时间升序排列的链表上，插入时线性查找位置。实现虽朴素，但整个进程只有这一条链，主循环每次只需取链表头，就知道下一次应等待多久。插入复杂度是 O(n)，而 n 是同时存在的定时器数量，实际为百量级，足够使用。
 
-`eloop_run()`（`src/utils/eloop.c:1075`）的主循环就三件事：算下次超时、等 socket 事件、派发回调。信号也不是异步回调，而是"置个标志位，等主循环来收"。
+`eloop_run()`（`src/utils/eloop.c:1075`）的主循环只做三件事：计算下一次超时、等待 socket 事件、派发回调。信号的处理也不是异步回调，而是"置一个标志位，等主循环来收取"。
 
 <figure class="diagram">
 <div class="diagram-box">
@@ -94,29 +94,27 @@ wpa_supplicant 的启动链路长一些，顺序也值得记一下：`main()` �
 <figcaption>图 1　hostapd 的启动链路：接口初始化把耗时的活挂到 eloop 上，由回调收尾</figcaption>
 </figure>
 
-（STA 侧形状一样，只是把 beacon 换成了"排期首次扫描"。）
+（STA 侧结构相同，只是把"下发 beacon"换成了"排期首次扫描"。）
 
-启动流程最容易被低估的地方：它决定了后面所有的能力边界。驱动能力协商那一刻谈成了什么，决定了这个进程之后能不能做 offchannel、能不能卸载四次握手、能不能开 MLO。后面所有流程，都是在这条边界内跳舞。
+启动流程最容易被低估的地方在于：它决定了后面所有的能力边界。驱动能力协商那一刻谈成了什么，决定了这个进程之后能不能做 offchannel、能不能卸载四次握手、能不能开启 MLO。后面所有流程，都是在这条边界之内运行。
 
----
+## 底层通信的三条通道
 
-## 二、说话：底层通信的三条路
+hostapd 和 wpa_supplicant 处在"中间人"的位置：上方有 wpa_cli、NetworkManager 和各种脚本；下方是内核和无线固件；旁边还有对端 AP/STA 需要交换 EAPOL 帧。它同时维持着三种对话，每种走的通道都不一样。
 
-hostapd 和 wpa_supplicant 是"中间人"。上面有 wpa_cli、NetworkManager、各种脚本；下面有内核和无线固件；旁边还有对端 AP/STA 要交换 EAPOL 帧。它同时维持着三种对话，每种走的通道都不一样。
+### 控制接口：UNIX 数据报套接字
 
-### 第一条路：控制接口，一条 UNIX 数据报套接字
+在 `wpa_cli` 中敲一个 `status` 并回车，屏幕上就会返回结果。这条通道上传输的是**纯文本命令**，底层是一个 UNIX domain socket（默认数据报类型），路径由配置里的 `ctrl_interface=` 决定；接口级 socket 会带上接口名。
 
-`wpa_cli` 敲一个 `status`，回车，屏幕出结果。这条路上跑的是**纯文本命令**，通道是一个 UNIX domain socket（默认数据报类型），路径由配置里的 `ctrl_interface=` 决定，接口级 socket 会带上接口名。
+协议简单到近乎粗糙：客户端发一行命令，服务端回一行结果，`OK`/`FAIL` 是状态，其余是数据。若要接收事件推送，客户端须先发送 `ATTACH`，之后服务端会主动向该客户端推送事件行——`wpa_cli` 交互模式里那些 `<3>CTRL-EVENT-CONNECTED` 就是这么来的。
 
-协议本身简单到粗糙：客户端发一行命令，服务端回一行结果，`OK`/`FAIL` 是状态，其它是数据。想收事件推送的话，客户端要先发 `ATTACH`，之后服务端会主动往这个客户端推送事件行——`wpa_cli` 交互模式里那些 `<3>CTRL-EVENT-CONNECTED` 就是这么来的。
+这里有一个值得记住的设计事实：**控制接口没有认证机制**。能连上该 socket 的进程即可指挥本进程（修改配置、断开连接、触发扫描）。因此它的权限完全依靠文件系统权限和 socket 目录的属主来兜底，这也是绝大多数发行版把它放在 `/run/wpa_supplicant` 并限制访问的原因。这条边界的重要性使其在源码分析报告中单独成章，本文不再展开。
 
-这里有个值得记住的设计事实：**控制接口没有认证机制**。谁能连上那个 socket，谁就能指挥这个进程（改配置、断开、触发扫描）。所以它的权限完全靠文件系统权限和 socket 目录的属主来兜底，这也是为什么绝大多数发行版把它放在 `/run/wpa_supplicant` 并限制访问。第 09 章把这条边界单独写了一章，原因就在这。
+### netlink：与内核的命令和事件
 
-### 第二条路：内核，netlink 上的命令与事件
+真正让 WiFi 动起来的是 nl80211。用户态通过一个 netlink socket 向内核发送命令，内核用同一个 socket 返回响应，另外还会向多播组推送事件（扫描完成、认证结果、断开、雷达检测……）。
 
-真正让 WiFi 动起来的是 nl80211。用户态通过一个 netlink socket 给内核发命令，内核用同一个 socket 回响应，另外还会往多播组里推事件（扫描完成、认证结果、断开、雷达检测……）。
-
-发命令的公共出口是 `send_and_recv_glb()`（`src/drivers/driver_nl80211.c:640`）：
+发送命令的公共出口是 `send_and_recv_glb()`（`src/drivers/driver_nl80211.c:640`）：
 
 ```c
 int send_and_recv_glb(struct nl80211_global *global,
@@ -129,17 +127,17 @@ int send_and_recv_glb(struct nl80211_global *global,
 		      struct nl80211_err_info *err_info)
 ```
 
-函数名里的 `glb` 是有讲究的：有些命令属于"全局"（跟具体接口无关，比如新建接口、注册帧），要用全局 socket 发；另一些属于某个接口。hostap 里这两类共用这套收发逻辑，靠参数区分。
+函数名里的 `glb` 是有讲究的：有些命令属于"全局"（与具体接口无关，比如新建接口、注册帧），需要用全局 socket 发送；另一些命令则属于某个接口。hostap 中这两类命令共用这套收发逻辑，靠参数区分。
 
-发出去的动作在 `:683` 的 `nl_send_auto_complete()`。注意 `auto_complete` 这个词：libnl 会自动帮你补上 netlink 头，包括序列号。而**响应与命令的配对就是靠这个序列号**——发的时候记住序号，收的时候只认序号相同的那个回复，序号不匹配的一律当作事件处理。
+实际发送的动作在 `:683` 处的 `nl_send_auto_complete()`。注意 `auto_complete` 一词：libnl 会自动补全 netlink 头，包括序列号。而**响应与命令的配对正是依靠这个序列号**——发送时记录序号，接收时只认序号相同的回复，序号不匹配的一律按事件处理。
 
-事件这边有个坑，值得单独说。netlink 事件的回调是在 socket 可读的时候触发的，也就是在 eloop 的回调栈里。如果直接在回调里把事件交给上层处理，上层可能顺手又发一条 netlink 命令，而这条命令的响应又会回到同一个 socket——重入。hostap 的解法是把事件先塞进队列，用零超时定时器"下一轮再放"：`nl80211_deliver_pending_events()`（`src/drivers/driver_nl80211.c:532`）配合 `pending_events` 链表，把事件推迟到主循环的下一次迭代。看这段代码时我第一反应是"这不是多此一举吗"，想明白重入之后才发现这十行救了不知道多少调试时间。
+事件路径上有一个值得单独说明的问题。netlink 事件的回调在 socket 可读时触发，也就是在 eloop 的回调栈里执行；如果直接在回调中把事件交给上层处理，上层可能随即又发一条 netlink 命令，而这条命令的响应又会回到同一个 socket——构成重入。hostap 的解法是先把事件放入队列，再用零超时定时器"下一轮再放"：`nl80211_deliver_pending_events()`（`src/drivers/driver_nl80211.c:532`）配合 `pending_events` 链表，把事件推迟到主循环的下一次迭代。这套"推迟一轮"的机制，解决的是一个相当隐蔽的重入问题。
 
-### 第三条路：二层，AF_PACKET 上的 EAPOL
+### l2_packet：AF_PACKET 上的 EAPOL
 
-WiFi 的安全握手要交换 EAPOL 帧。这些帧是**以太网帧**（EtherType `0x888E`），在关联之前就得能收发，那时候接口还没"通"，不能用普通 IP socket。所以 hostap 用 `AF_PACKET` 原始套接字，抽象成 `l2_packet`，Linux 后端在 `src/l2_packet/l2_packet_linux.c`。
+WiFi 的安全握手需要交换 EAPOL 帧。这些帧是**以太网帧**（EtherType `0x888E`），在关联之前就得能够收发，而那时接口尚未"通"，不能使用普通 IP socket。因此 hostap 使用 `AF_PACKET` 原始套接字，抽象成 `l2_packet`，Linux 后端在 `src/l2_packet/l2_packet_linux.c`。
 
-发送路径短得很（`src/l2_packet/l2_packet_linux.c:115`）：
+发送路径很短（`src/l2_packet/l2_packet_linux.c:115`）：
 
 ```c
 int l2_packet_send(struct l2_packet_data *l2, const u8 *dst_addr, u16 proto,
@@ -156,11 +154,11 @@ int l2_packet_send(struct l2_packet_data *l2, const u8 *dst_addr, u16 proto,
 		...
 ```
 
-`l2_hdr` 这个分支的意思是"缓冲区里已经带好以太网头了就直接发，否则自己拼一个 `sockaddr_ll` 再 `sendto`"。看起来是琐碎优化，实际是给不同调用方留的两种用法。
+`l2_hdr` 分支的含义是：缓冲区里已经带好以太网头就直接发送，否则自行拼一个 `sockaddr_ll` 再 `sendto`。看似琐碎的优化，实际是为不同调用方留的两种用法。
 
-接收侧有个容易忽略的时间点：套接字建好之后**并不能**立刻收到所有帧，需要主动把它加入多播组。这一步在 `l2_packet_notify_auth_start()`（`src/l2_packet/l2_packet_linux.c:479`），由关联完成的事件触发（`wpa_supplicant/events.c:5060`）。名字里的 `auth_start` 就是"马上要做认证了，准备收 EAPOL"。
+接收侧有一个容易忽略的时间点：套接字建好之后**并不能**立刻收到所有帧，需要主动把它加入多播组。这一步在 `l2_packet_notify_auth_start()`（`src/l2_packet/l2_packet_linux.c:479`），由关联完成的事件触发（`wpa_supplicant/events.c:5060`）。函数名里的 `auth_start` 含义是"马上要做认证了，准备接收 EAPOL"。
 
-AP 侧和 STA 侧各有一套 `l2_packet`（`hapd->l2` 和 `wpa_s->l2`），preauth 还有一套独立的，互不复用。这不是浪费，是因为它们要收的帧、要加的过滤规则不一样。
+AP 侧和 STA 侧各有一套 `l2_packet`（`hapd->l2` 和 `wpa_s->l2`），preauth 还有一套独立的，彼此不复用。这不是浪费，因为它们要接收的帧、要添加的过滤规则并不一样。
 
 <figure class="diagram">
 <div class="diagram-box">
@@ -169,42 +167,40 @@ AP 侧和 STA 侧各有一套 `l2_packet`（`hapd->l2` 和 `wpa_s->l2`），prea
 <figcaption>图 2　三条通信通道：控制接口、netlink（内核）、EAPOL（对端）</figcaption>
 </figure>
 
-三条路的共同点是都"注册进 eloop，回调驱动"。区别在于：控制接口是**给人看的**，协议松散、可脚本化；netlink 是**给内核看的**，有严格的配对和错误码；二层是**给对端看的**，帧格式由 802.11/802.1X 定死。
+三条通道的共同点是都"注册进 eloop，由回调驱动"；区别在于：控制接口是**给人看的**，协议松散、可脚本化；netlink 是**给内核看的**，有严格的配对和错误码；二层通道是**给对端看的**，帧格式由 802.11/802.1X 标准定死。
 
-调试的时候按这三条路分，通常不会迷路：命令没生效查控制接口，动作没下发查 netlink（`nl80211` 相关的 debug 日志会打出命令名），握手没走完就抓 EAPOL。
+调试时按这三条通道划分，通常不会迷路：命令没有生效就查控制接口，动作没有下发就查 netlink（`nl80211` 相关的 debug 日志会打出命令名），握手没有走完就抓 EAPOL。
 
----
+## 连接的建立：从扫描到四次握手
 
-## 三、谈成：从扫描到四次握手
+### 扫描、选网、认证与关联
 
-### 前面还有三步，都很快
+扫描：`wpa_supplicant_req_scan()` 负责排定定时器，`wpa_supplicant_scan()` 负责真正组装参数并下发，结果回来后进入 BSS 表。
 
-扫描：`wpa_supplicant_req_scan()` 排定时器，`wpa_supplicant_scan()` 真正组参数下发，结果回来进 BSS 表。
+选网：`wpa_supplicant_select_bss()` 在 BSS 表中挑选一个符合当前 network 配置的条目（SSID、安全类型、优先级、BSSID 限制都参与筛选）。
 
-选网：`wpa_supplicant_select_bss()` 在 BSS 表里挑一个符合当前 network 配置的（SSID、安全类型、优先级、BSSID 限制都参与筛选）。
+认证与关联：进入 SME，入口是 `sme_send_authentication()`（`wpa_supplicant/sme.c:1485`）。该函数有 800 多行，因为它要把 OPEN / SAE / FT / DPP / OWE 各种分支都容纳进来。进去之后，状态机会把 `wpa_s` 推进到 `WPA_AUTHENTICATING`（`wpa_supplicant/sme.c:2286`），随后就是认证帧、关联帧的往返。这一步如果失败，状态机会退回扫描（`wpa_supplicant/scan.c:260` 那段处理的就是"扫描失败时回到之前的状态"）。
 
-认证关联：进入 SME，`sme_send_authentication()`（`wpa_supplicant/sme.c:1485`）。这函数有 800 多行，因为它要把 OPEN / SAE / FT / DPP / OWE 各种分支都塞进去。进去之后状态机会把 `wpa_s` 推到 `WPA_AUTHENTICATING`（`wpa_supplicant/sme.c:2286`），后面就是认证帧、关联帧的来回。这一步如果失败，状态机会退回扫描（`wpa_supplicant/scan.c:260` 那段就是"扫描失败时回到之前的状态"）。
+关联成功后，AP 与 STA 之间便有了一条能够传输数据帧的链路——但还不能传数据，因为尚未安装密钥。接下来的几毫秒，是整条链路上最精密的一段。
 
-关联成功，AP 和 STA 之间就有了一条能过数据帧的链路——但还不能传数据，因为还没有密钥。接下来这几毫秒，是整条链路上最精密的一段。
+### 四次握手：四条消息各司其职
 
-### 四条消息，各管一件事
+WPA/WPA2 的四次握手在 STA 侧对应四个函数，函数名可以直接对上：
 
-WPA/WPA2 的四次握手在 STA 侧就四个函数，看名字就能对上：
-
-| 消息 | STA 侧入口 | 干什么 |
+| 消息 | STA 侧入口 | 作用 |
 |---|---|---|
 | 1/4 | `wpa_supplicant_process_1_of_4()`（`src/rsn_supp/wpa.c:956`） | 收到 AP 的 ANonce，生成自己的 SNonce，算出 PTK，回 2/4 |
 | 2/4 | `wpa_supplicant_send_2_of_4()`（`src/rsn_supp/wpa.c:526`） | 把 SNonce 交给 AP，并带上一个 MIC 证明自己知道 PMK |
 | 3/4 | `wpa_supplicant_process_3_of_4()`（`src/rsn_supp/wpa.c:2836`） | 校验 AP 的 MIC、装 PTK、解出并安装 GTK，回 4/4 |
-| 4/4 | `wpa_supplicant_send_4_of_4()`（`src/rsn_supp/wpa.c:2391`） | 一个确认。发完这条，加密链路才算立起来 |
+| 4/4 | `wpa_supplicant_send_4_of_4()`（`src/rsn_supp/wpa.c:2391`） | 确认。发完这条，加密链路才算建立 |
 
-为什么是四条？把每条消息当成一句对话就懂了：
+为什么是四条消息？把每条消息当作一句对话即可理解。
 
-1/4 是 AP 说："这是我的随机数 ANonce，你拿它算密钥。"STA 手里有 PMK（口令或 802.1X 认证得来）、有双方 MAC、现在又有了 ANonce，再自己生成一个 SNonce，就能用 PRF 算出 PTK。注意：**PTK 是双方各自独立算出来的**，从来没有在链路上传过。这是这套握手的全部魔法。
+1/4，AP 说："这是我的随机数 ANonce，你拿它计算密钥。"STA 手里有 PMK（由口令或 802.1X 认证得来）、有双方 MAC，现在又有了 ANonce，再自行生成一个 SNonce，就能用 PRF 算出 PTK。注意：**PTK 是双方各自独立算出来的**，从来没有在链路上传输过——这是整套握手机制的关键所在。
 
-2/4 是 STA 回话："这是我的 SNonce"，外加一个用 PTK 里的 KCK 算出的 MIC。AP 收到 SNonce 后自己也能算出同一个 PTK，一验 MIC 就知道对方确实知道 PMK——而不是随便什么人在瞎发帧。
+2/4，STA 回话："这是我的 SNonce"，外加一个用 PTK 中 KCK 算出的 MIC。AP 收到 SNonce 后自己也能算出同一个 PTK，一验 MIC 就知道对方确实知道 PMK——而不是随便什么设备在胡乱发帧。
 
-3/4 是 AP 说："我也知道 PMK（同样用 MIC 证明），另外这是组密钥 GTK，你装上。"这条消息里 PTK 的安装、GTK 的分发挤在一起，`wpa_supplicant_process_3_of_4()` 光开头就要处理一堆前置判断：
+3/4，AP 说："我也知道 PMK（同样用 MIC 证明），另外这是组密钥 GTK，你装上。"这条消息把 PTK 安装与 GTK 分发挤在一起，`wpa_supplicant_process_3_of_4()` 光开头就要处理一堆前置判断：
 
 ```c
 static void wpa_supplicant_process_3_of_4(struct wpa_sm *sm,
@@ -223,13 +219,13 @@ static void wpa_supplicant_process_3_of_4(struct wpa_sm *sm,
 		" (ver=%d)%s", MAC2STR(sm->bssid), ver, mlo ? " (MLO)" : "");
 ```
 
-`mlo` 那个变量就是 Wi-Fi 7 留下的痕迹：多链路场景下，一条链路完成握手，密钥要装到所有链路上去，KDE 的校验也就多了一层。
+其中 `mlo` 变量就是 Wi-Fi 7 留下的痕迹：多链路场景下，一条链路完成握手后，密钥要装到所有链路上去，KDE 的校验也因此多了一层。
 
-4/4 是 STA 最后确认一句"收到"。它本身不带新信息，作用是让 AP 确认 STA 已经就绪，可以正式开加密。
+4/4，STA 最后确认一句"收到"。它本身不带新信息，作用是让 AP 确认 STA 已经就绪，可以正式开启加密。
 
-### 失败和重传藏在哪
+### 超时与重传
 
-握手是会丢包的，所以 AP 侧每条消息发出去都要挂个定时器。这个逻辑在 `wpa_send_eapol()`（`src/ap/wpa_auth.c:2365`）：
+握手是会丢包的，所以 AP 侧每条消息发出后都要挂一个定时器。该逻辑在 `wpa_send_eapol()`（`src/ap/wpa_auth.c:2365`）：
 
 ```c
 static void wpa_send_eapol(struct wpa_authenticator *wpa_auth,
@@ -248,19 +244,19 @@ static void wpa_send_eapol(struct wpa_authenticator *wpa_auth,
 	ctr = pairwise ? sm->TimeoutCtr : sm->GTimeoutCtr;
 ```
 
-`TimeoutCtr` 是重传计数，`pairwise` 区分成对密钥还是组密钥——两者的重传策略、超时长度都不一样（代码里还有"STA 数量超过 100 就用另一套超时"这种实战经验留下的分支）。
+其中 `TimeoutCtr` 是重传计数，`pairwise` 区分成对密钥与组密钥——两者的重传策略、超时长度都不一样（代码里还有"STA 数量超过 100 就换用另一套超时"这种来自实战经验的分支）。
 
-STA 侧也有一个不那么直觉的分支。在 `wpa_supplicant_process_1_of_4()` 里，如果 `wpa_supplicant_get_pmk()` 返回 `-2`，代码会**故意不回复** 1/4，而是要求走一次完整的 EAP 认证再重新开始握手。原因很实在：没有 PMK 就没法算 PTK，硬回一条 2/4 只会让 AP 反复重传。这种"沉默即拒绝"的语义在 RFC 里没写，但代码里到处都是。
+STA 侧也有一个不那么直觉的分支。在 `wpa_supplicant_process_1_of_4()` 里，如果 `wpa_supplicant_get_pmk()` 返回 `-2`，代码会**故意不回复** 1/4，而是要求走一次完整的 EAP 认证再重新开始握手。原因很实在：没有 PMK 就没法算 PTK，硬回一条 2/4 只会让 AP 反复重传。这种"沉默即拒绝"的语义在 RFC 里没有写，但代码里到处都是。
 
-### 密钥最后落到哪里
+### 密钥的安装
 
-算出来的 PTK 不是摆着看的，要按顺序装进驱动。顺序有讲究，AP 侧所有密钥安装都走同一个出口 `wpa_auth_set_key()`（`src/ap/wpa_auth.c:292`），实参里带 `WPA_ALG_*` 和 key index。把它的调用点列出来，握手的时间线就出来了：
+算出来的 PTK 不是摆着看的，要按顺序装进驱动。顺序有讲究：AP 侧所有密钥安装都走同一个出口 `wpa_auth_set_key()`（`src/ap/wpa_auth.c:292`），实参里带 `WPA_ALG_*` 和 key index。把它的调用点列出来，握手的时间线就清晰了：
 
 - 发 3/4 之前，先给这条链路装 TK 的接收方向（`:5110`）和下一个索引（`:5122`）
 - 收到 4/4 之后，再把 TK 切成收发双向（`:5485`、`:5489`）
 - 组密钥 GTK / IGTK / BIGTK 在另一条路径上装（`:6305`、`:6316`、`:6343`）
 
-先装接收、后装发送，是为了避免"自己发的帧自己解不开"这种窗口期。这类顺序约束在密码学代码里通常不会写在注释里，但改错了就会出各种诡异的丢包。
+先装接收、后装发送，是为了避免"自己发的帧自己解不开"的窗口期。这类顺序约束在密码学代码里通常不会写在注释里，但改错了就会出各种诡异的丢包。
 
 <figure class="diagram">
 <div class="diagram-box">
@@ -269,13 +265,11 @@ STA 侧也有一个不那么直觉的分支。在 `wpa_supplicant_process_1_of_4
 <figcaption>图 3　四次握手：ANonce → SNonce → GTK → 确认，PTK 由双方各自算出</figcaption>
 </figure>
 
-握手完成，`wpa_s` 的状态从 `WPA_4WAY_HANDSHAKE` 走到 `WPA_COMPLETED`。日志里那行 `CTRL-EVENT-CONNECTED`，就是在这个时刻打出来的。
+握手完成后，`wpa_s` 的状态从 `WPA_4WAY_HANDSHAKE` 走到 `WPA_COMPLETED`。日志里那行 `CTRL-EVENT-CONNECTED`，就是在这个时刻打出来的。
 
----
+## 全流程回顾
 
-## 把三件事串起来
-
-现在回头看那三秒，它其实是这样的：
+回过头看，那几秒钟实际是这样度过的：
 
 <figure class="diagram">
 <div class="diagram-box">
@@ -284,28 +278,25 @@ STA 侧也有一个不那么直觉的分支。在 `wpa_supplicant_process_1_of_4
 <figcaption>图 4　一次连接的全景时间线（从启动到 CTRL-EVENT-CONNECTED）</figcaption>
 </figure>
 
-三段代码咬合得很紧：启动流程把"以后会发生什么"变成了一堆回调注册；底层通信保证这些回调在正确的时机被叫醒；握手流程则是在这些回调之间跑完一次不能出错的谈判。
+三段代码咬合得很紧：启动流程把"以后会发生什么"变成了一组回调的注册；底层通信保证这些回调在正确的时机被唤醒；握手流程则在这些回调之间跑完一次不能出错的谈判。
 
-## 读完之后记住的几件事
+## 阅读这份代码时值得记住的几点
 
-**单线程是这个项目的底色，也是它可预测的原因。** 全仓库没有线程，没有锁，所有并发都是"事件排队 + 状态机推进"。代价是任何一个回调卡住就全线卡住（比如某些驱动 ioctl 会很慢），收益是几乎没有数据竞争类的 bug。要读这个代码，先接受这个前提，否则会一直在找根本不存在的锁。
+**单线程是这个项目的底色，也是其行为可预测的原因。** 全仓库没有线程，没有锁，所有并发都是"事件排队 + 状态机推进"。代价是任何一个回调阻塞就会全线阻塞（比如某些驱动的 ioctl 会很慢），收益是几乎没有数据竞争类的 bug。阅读这份代码之前先接受这个前提，否则会一直在寻找根本不存在的锁。
 
-**状态机是用宏写出来的。** `src/utils/state_machine.h` 里那套 `SM_STATE`/`SM_STEP` 宏，第一次看会有点懵，但它是理解 AP 侧认证器和 EAPOL 状态机的钥匙——一个状态就是一个 case，`SM_STEP` 是驱动器。同一套宏在 `src/eapol_auth/`、`src/rsn_supp/`、`src/ap/wpa_auth.c` 里反复出现。
+**状态机是用宏写出来的。** `src/utils/state_machine.h` 里那套 `SM_STATE`/`SM_STEP` 宏，第一次阅读会有些吃力，但它是理解 AP 侧认证器和 EAPOL 状态机的钥匙——一个状态就是一个 case，`SM_STEP` 是驱动器。同一套宏在 `src/eapol_auth/`、`src/rsn_supp/`、`src/ap/wpa_auth.c` 里反复出现。
 
-**错误码是有语义的。** `-1` 通常是"失败，放弃"，`-2` 常常意味着"现在不行，等一下/换个路径"，而返回值 `1` 在很多地方表示"我已经处理了，你别再管"。这类约定没有文档，只能从调用点反推。上面 1/4 那条"故意不回"的分支就是典型。
+**错误码是有语义的。** `-1` 通常是"失败，放弃"，`-2` 常常意味着"现在不行，等一下或者换条路径"，而返回值 `1` 在很多地方表示"我已经处理了，不必再管"。这类约定没有文档，只能从调用点反推。上文 1/4 那条"故意不回"的分支就是典型例子。
 
-**老代码的味道很重。** 驱动后端里还留着 `wext`（十几年前的无线扩展接口）、`ndis`（Windows）、BSD 的实现；`wpa_supplicant` 的目录里还躺着 Qt4 写的图形界面。它们不是垃圾，是这个项目二十年兼容史的化石层。读主线的时候可以直接跳过，但别急着删。
+**历史遗留代码的味道很重。** 驱动后端里还留着 `wext`（十几年前的无线扩展接口）、`ndis`（Windows）、BSD 的实现；`wpa_supplicant` 目录里还躺着 Qt4 写的图形界面。它们不是垃圾，而是这个项目二十年兼容史的化石层。阅读主线时可以直接跳过，但不必急于删除。
 
-**可观测性是这个项目最被低估的设计。** `-d` 打开调试能刷出每条 netlink 命令和每个 EAPOL 帧的细节；控制接口能把内部状态（`STATUS`、`BSS`、`GET_NETWORK`）原样吐出来；事件推送机制让外部工具能实时跟着状态走。一个协议栈能不能被调试，很大程度上取决于它有没有这种"把内脏露出来"的自觉。hostap 有。
+**可观测性是这个项目最被低估的设计。** `-d` 打开调试可以刷出每条 netlink 命令和每个 EAPOL 帧的细节；控制接口能把内部状态（`STATUS`、`BSS`、`GET_NETWORK`）原样输出；事件推送机制让外部工具能够实时跟随状态。一个协议栈是否易于调试，很大程度上取决于它有没有这种把内部状态展示出来的自觉。hostap 具备这种自觉。
 
-## 附：这些行号怎么复核
+## 附：行号复核方法
 
-这篇文章里的每个 `路径:行号` 都对着 `hostap` 仓库 HEAD `d05533d` 实测过，不是凭记忆写的。工程里有两样东西可以直接用：
+本文中每个 `路径:行号` 都对着 `hostap` 仓库 HEAD `d05533d` 实测核对过，不是凭记忆写的。工程里有两样东西可以直接使用：
 
-- `annotated/` 是同一份源码的中文注释版（824 个 C/H 文件、14,950 个函数都有注释，且校验过"只加注释、代码零改动"），看某个函数时可以对照着读；
-- `data/verify-annotated.txt`、`data/annotation-coverage.md` 记录了注释版的校验结论；`data/callgraph.tsv` 是实测的调用关系图（93,352 条边），本文里"谁调用谁"的说法都以它为准。
+- `annotated/` 是同一份源码的中文注释版（824 个 C/H 文件、14,950 个函数都有注释，且校验过"只加注释、代码零改动"），阅读某个函数时可以对照着看；
+- `data/verify-annotated.txt`、`data/annotation-coverage.md` 记录了注释版的校验结论；`data/callgraph.tsv` 是实测的调用关系图（93,352 条边），本文中"谁调用谁"的说法都以它为准。
 
-如果你只想顺着本文翻一遍代码，建议的顺序是：`hostapd/main.c` 和 `wpa_supplicant/main.c` 各看一遍 main 的骨架，然后 `src/ap/hostapd.c` 的 `hostapd_setup_interface()`，再跳到 `src/utils/eloop.c` 看主循环，最后回 `src/rsn_supp/wpa.c` 从 `wpa_supplicant_process_1_of_4()` 读到 `wpa_supplicant_send_4_of_4()`。差不多一个下午，能把这套东西的主干摸清楚。
-
-
-
+如果只想顺着本文翻一遍代码，建议的顺序是：先看 `hostapd/main.c` 和 `wpa_supplicant/main.c` 中 main 的骨架，然后看 `src/ap/hostapd.c` 的 `hostapd_setup_interface()`，再跳到 `src/utils/eloop.c` 看主循环，最后回到 `src/rsn_supp/wpa.c`，从 `wpa_supplicant_process_1_of_4()` 读到 `wpa_supplicant_send_4_of_4()`。大约一个下午的时间，可以把这套东西的主干摸清楚。
