@@ -3,6 +3,7 @@ title: Hostapd 详解
 date: 2026-09-28 20:32
 tags: [WiFi, 源码分析, 网络, hostapd]
 summary: 从配置文件到四次握手，把 hostapd 这个用户态守护进程拆开来看：eloop 事件循环、驱动封装、ACS/DFS 信道选择、控制接口与设备接入的完整流程，配上源码片段与流程图。
+draft: true
 ---
 
 ## 简介
